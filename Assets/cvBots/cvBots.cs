@@ -1,11 +1,12 @@
-﻿using System.Collections;
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
 public class cvBots : MonoBehaviour {
-    Vector3 ll;
-    Vector3 ul;
-    Vector3 lr;
+    // mar 3 2018 try
+    Vector3 ll = Vector3.zero;
+    Vector3 ul = Vector3.zero;
+    Vector3 lr = Vector3.zero;
     GameObject camBodyL;
     GameObject camBodyR;
     GameObject pixL;
@@ -14,6 +15,7 @@ public class cvBots : MonoBehaviour {
     GameObject scrR;
     GameObject linL;
     GameObject linR;
+    GameObject linMid;
     Camera camL;
     Camera camR;
     RenderTexture rtL;
@@ -25,15 +27,27 @@ public class cvBots : MonoBehaviour {
     GameObject rigOffset;
     GameObject head;
     GameObject parent;
-    public float eyeSize = .5f;
+    GameObject shoulder;
+    GameObject eyeBackL;
+    GameObject eyeBackR;
+    Color colBall = Color.green;
+    [Range(0, 200)]
+    public float ballCenterZ = 100;
+    [Range(0, 200)]
+    public float ballRadius = 65;
+    public bool ynReverse;
+    [Range(0, 1)]
+    public float smooth = .5f;
     public float ipd = 20;
     public float nearClipPlaneDist = 3;
     public float fov = 100;
-    public int pixelRes = 256;
-    public float ballSpeed = 2f;
+    public int pixelRes = 512;
+    [Range(0, 20)]
+    public float ballSpeed = 7f;
+    [Range(2, 15)]
     public float neckSpeed = 4;
-    float headPitch;
-    float headYaw;
+    float rigPitchRotate;
+    float rigYawRotate;
     int iL;
     int jL;
     int iR;
@@ -42,9 +56,11 @@ public class cvBots : MonoBehaviour {
     float timeStart;
     public bool ynStep;
     public bool ynManual;
+    public bool ynHideBall;
+    public bool ynShoulderLimit;
     [Range(0, 200)]
     public float cameraHeight = 100;
-    public float tolColor = .01f;
+    public float tolColor = .1f;
     bool ynFoundLeft;
     bool ynFoundRight;
     int frameCount;
@@ -91,29 +107,68 @@ public class cvBots : MonoBehaviour {
 
     void moveBall()
     {
-        if (frameCount == 0) {
-            ball.transform.position = new Vector3( -60, 0, 0);
+        float rad = ballRadius;
+        float ang = frameCount * ballSpeed;
+        Vector3 pos = shoulder.transform.position + shoulder.transform.forward * ballCenterZ;
+        float x = pos.x + rad * Mathf.Cos(ang * Mathf.Deg2Rad);
+        float y = pos.y + rad * Mathf.Sin(ang * Mathf.Deg2Rad);
+        float z = pos.z + .5f * rad * Mathf.Sin(ang * Mathf.Deg2Rad);
+        if (ynReverse == true) {
+            ball.transform.position = new Vector3(-x, y, z);
+        } else {
+            ball.transform.position = new Vector3(x, y, z);
         }
-        float pitch = Mathf.Cos(frameCount * Mathf.Deg2Rad);
-        ball.transform.Rotate(pitch, 2, 0);
-        ball.transform.position += ball.transform.forward * ballSpeed;
+        //
+        if (ynHideBall == true) {
+            ball.GetComponent<Renderer>().material.color = Color.clear;
+        } else {
+            ball.GetComponent<Renderer>().material.color = colBall;
+        }
     }
 
     void updateCv()
     {
-        updatePixelAndLine(camBodyL, camL, rtL, scrL, pixL, linL, "L");
-        updatePixelAndLine(camBodyR, camR, rtR, scrR, pixR, linR, "R");
+        updatePixelAndLine(camBodyL, camL, rtL, scrL, eyeBackL, pixL, linL, "L");
+        updatePixelAndLine(camBodyR, camR, rtR, scrR, eyeBackR, pixR, linR, "R");
         //
         if (ynFoundLeft == true && ynFoundRight == true)
         {
-            head.GetComponent<Renderer>().material.color = Color.white;
-            orientateHead();
+            orientateRig();
         } else {
-            head.GetComponent<Renderer>().material.color = Color.grey;
+            orientateRigSearch();
         }
+        adjustLinMid();
     }
 
-    void orientateHead() {
+    void adjustLinMid()
+    {
+        Vector3 posCam = Vector3.zero;
+        Vector3 posPix = Vector3.zero;
+        if (ynFoundLeft == true && ynFoundRight == true) {
+            posCam = (camBodyL.transform.position + camBodyR.transform.position) / 2;
+            posPix = (pixL.transform.position + pixR.transform.position) / 2;
+        }
+        if (ynFoundLeft == true && ynFoundRight == false)
+        {
+            posCam = camBodyL.transform.position;
+            posPix = pixL.transform.position;
+        }
+        if (ynFoundLeft == false && ynFoundRight == true)
+        {
+            posCam = camBodyR.transform.position;
+            posPix = pixR.transform.position;
+        }
+        if (ynFoundLeft == false && ynFoundRight == false)
+        {
+            posCam = (camBodyL.transform.position + camBodyR.transform.position) / 2;
+            posPix = posCam;
+        }
+        adjustLine(linMid, posCam, posPix);
+    }
+
+    void orientateRig() {
+        showHidePixAndLin(true);
+        head.GetComponent<Renderer>().material.color = Color.white;
         float pitch = 0;
         float jAve = (jL + jR) / 2;
         float y = jAve / (float)pixelRes;
@@ -135,13 +190,83 @@ public class cvBots : MonoBehaviour {
         if (x > .55f && x < 1f) {
             yaw = neckSpeed;
         }
-        float smooth = .95f;
-        headPitch = headPitch * smooth + pitch * (1 - smooth);
-        headYaw = headYaw * smooth + yaw * (1 - smooth);
-        rig.transform.Rotate(headPitch, headYaw, -1 * rig.transform.eulerAngles.z);
+        bool ynMove = true;
+        head.GetComponent<Renderer>().material.color = Color.white;
+        float rigPitchRange = 20;
+        float rigPitchMin = -1 * rigPitchRange;
+        float rigPitchMax = rigPitchRange;
+        float rigPitch = rig.transform.eulerAngles.x;
+        if (rigPitch > 180) rigPitch -= 360;
+        if (rigPitch < rigPitchMin && pitch <= 0)
+        {
+            ynMove = false;
+        }
+        if (rigPitch > rigPitchMax && pitch > 0)
+        {
+            ynMove = false;
+        }
+        if (rigPitch < rigPitchMin || rigPitch > rigPitchMax)
+        {
+            head.GetComponent<Renderer>().material.color = Color.blue;
+        }
+        float rigYawRange = 20;
+        float rigYawMin = -1 * rigYawRange;
+        float rigYawMax = rigYawRange;
+        float rigYaw = rig.transform.eulerAngles.y;
+        if (rigYaw > 180) rigYaw -= 360;
+        if (rigYaw < rigYawMin && yaw <= 0)
+        {
+            ynMove = false;
+        }
+        if (rigYaw > rigYawMax && yaw > 0)
+        {
+            ynMove = false;
+        }
+        if (rigYaw < rigYawMin || rigYaw > rigYawMax) {
+            head.GetComponent<Renderer>().material.color = Color.red;
+        }
+        //ynMove = true;
+//        Debug.Log(rigYawMin + " < " + rigYaw + " < " + rigYawMax + " " + ynMove + " " + yaw + " " + ynCanMove);
+        if (ynMove == true || ynShoulderLimit == false)
+        {
+            rigPitchRotate = rigPitchRotate * smooth + pitch * (1 - smooth);
+            rigYawRotate = rigYawRotate * smooth + yaw * (1 - smooth);
+            rig.transform.Rotate(rigPitchRotate, rigYawRotate, -1 * rig.transform.eulerAngles.z);
+        }
     }
 
-    void updatePixelAndLine(GameObject camBody, Camera cam, RenderTexture rt, GameObject scr, GameObject pix, GameObject lin, string txt)
+    void showHidePixAndLin(bool yn) {
+        if (yn == true)
+        {
+            float s = scrL.transform.localScale.x * .1f;
+            Vector3 sca = new Vector3(s, s, s);
+            pixL.transform.localScale = sca;
+            pixR.transform.localScale = sca;
+        } 
+        else 
+        {
+            pixL.transform.localScale = Vector3.zero;
+            pixR.transform.localScale = Vector3.zero;
+            //
+            linL.transform.localScale = Vector3.zero;
+            linR.transform.localScale = Vector3.zero;
+            //
+            linMid.transform.localScale = Vector3.zero;
+        }
+    }
+
+    void orientateRigSearch()
+    {
+        showHidePixAndLin(false);
+        return;
+        float s = 3;
+        float pitch = s;
+        float yaw = s;
+        float roll = s;
+        rig.transform.Rotate(pitch, yaw, roll);
+    }
+
+    void updatePixelAndLine(GameObject camBody, Camera cam, RenderTexture rt, GameObject scr, GameObject eyeBack, GameObject pix, GameObject lin, string txt)
     {
         int i = -1;
         int j = -1;
@@ -152,13 +277,14 @@ public class cvBots : MonoBehaviour {
             j = bestN / pixelRes;
             updatePixel(cam, scr, pix, i, j);
             adjustLine(lin, camBody.transform.position, pix.transform.position);
+            eyeBack.GetComponent<Renderer>().material.color = Color.white;
             //
             if (txt == "L")
             {
                 iL = i;
                 jL = j;
                 ynFoundLeft = true;
-            }
+           }
             else
             {
                 iR = i;
@@ -166,6 +292,7 @@ public class cvBots : MonoBehaviour {
                 ynFoundRight = true;
             }
         } else {
+            eyeBack.GetComponent<Renderer>().material.color = Color.red;
             if (txt == "L")
             {
                 ynFoundLeft = false;
@@ -275,18 +402,16 @@ public class cvBots : MonoBehaviour {
         scr.transform.localScale = new Vector3(Vector3.Distance(ll, lr), Vector3.Distance(ll, ul), 1);
         hideLayer(scr);
         //
-        GameObject scrBack = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        scrBack.transform.position = camBody.transform.position + camBody.transform.forward * (cam.nearClipPlane + 1);
-        scrBack.transform.localScale = scr.transform.localScale;
-        scrBack.transform.parent = camBody.transform;
-        hideLayer(scrBack);
+        GameObject eyeBack = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        eyeBack.transform.position = camBody.transform.position + camBody.transform.forward * (cam.nearClipPlane + 1);
+        eyeBack.transform.localScale = scr.transform.localScale;
+        eyeBack.transform.parent = camBody.transform;
+        hideLayer(eyeBack);
 
         // pix
         GameObject pix = GameObject.CreatePrimitive(PrimitiveType.Sphere);
         pix.name = "pix" + txt;
         pix.GetComponent<Renderer>().material.color = Color.black;
-        float sca = scr.transform.localScale.x * eyeSize;
-        pix.transform.localScale = new Vector3(sca, sca, sca);
         pix.transform.position = new Vector3(-5, 0, 25);
         pix.transform.parent = parent.transform;
         hideLayer(pix);
@@ -308,21 +433,19 @@ public class cvBots : MonoBehaviour {
             scrL = scr;
             pixL = pix;
             linL = lin;
+            eyeBackL = eyeBack;
         } else {
             camBodyR = camBody;
             camR = cam;
             scrR = scr;
             pixR = pix;
             linR = lin;
+            eyeBackR = eyeBack;
         }
     }
 
     void initRig() 
     {
-        ll = Vector3.zero;
-        lr = Vector3.zero;
-        ul = Vector3.zero;
-
         // rig parents
         rig = new GameObject("rig");
         rig.transform.parent = parent.transform;
@@ -350,8 +473,26 @@ public class cvBots : MonoBehaviour {
         ball.transform.localScale = new Vector3(2, 2, 2);
         ball.transform.position = new Vector3(-10, 0, 25);
         ball.GetComponent<Renderer>().material = new Material(Shader.Find("Unlit/Color"));
-        ball.GetComponent<Renderer>().material.color = Color.green;
+        ball.GetComponent<Renderer>().material.color = colBall;
         ball.transform.parent = transform;
+
+        // ball target
+        //ballTarget = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        //ballTarget.name = "ballTarget";
+        //ballTarget.transform.localScale = new Vector3(2, 2, 2);
+        //ballTarget.transform.position = new Vector3(-10, 0, 25);
+        //ballTarget.GetComponent<Renderer>().material = new Material(Shader.Find("Standard"));
+        //ballTarget.GetComponent<Renderer>().material.color = Color.magenta;
+        //ballTarget.transform.parent = transform;
+
+        //// ball look
+        //ballLook = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        //ballLook.name = "ballLook";
+        //ballLook.transform.localScale = new Vector3(2, 2, 2);
+        //ballLook.transform.position = new Vector3(-10, 0, 25);
+        //ballLook.GetComponent<Renderer>().material = new Material(Shader.Find("Standard"));
+        //ballLook.GetComponent<Renderer>().material.color = Color.cyan;
+        //ballLook.transform.parent = transform;
 
         // head
         head = GameObject.CreatePrimitive(PrimitiveType.Sphere);
@@ -361,6 +502,22 @@ public class cvBots : MonoBehaviour {
         head.GetComponent<Renderer>().material = new Material(Shader.Find("Standard"));
         head.GetComponent<Renderer>().material.color = Color.white;
         head.transform.parent = rig.transform;
+
+        // shoulder
+        shoulder = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        shoulder.name = "shoulder";
+        shoulder.transform.localScale = new Vector3(50, 11.7f, 8);
+        shoulder.transform.position = new Vector3(0, -13.8f, -5.7f);
+        shoulder.GetComponent<Renderer>().material = new Material(Shader.Find("Standard"));
+        shoulder.GetComponent<Renderer>().material.color = Color.yellow;
+        shoulder.transform.parent = parent.transform;
+        hideLayer(shoulder);
+        //
+        // lin
+        linMid = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        linMid.name = "linMid";
+        linMid.transform.parent = parent.transform;
+        hideLayer(linMid);
     }
 
     void hideLayer(GameObject go)
